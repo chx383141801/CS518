@@ -20,7 +20,7 @@ typedef struct thread_block_meta
 typedef struct pt_node
 {
 	int owner_id;		//thread id
-	int index;			//index of the page of current thread
+	int page_num;			//page_number
 	struct pt_node *next;		//indicate the next page
 	void *map_to_addr;  //the physical memory this page mapped to
 	void *current_addr;	//the physical memory this page currently swapped to
@@ -36,7 +36,7 @@ void init_page_table()
 	for (int i = 0 ; i < 2048 ; i++)
 	{
 		page_table[i].owner_id = -1;	//unused node has id -1
-		page_table[i].index = -1;
+		page_table[i].page_num= -1;
 		page_table[i].next = NULL;
 		page_table[i].map_to_addr = NULL;
 		page_table[i].current_addr = NULL;
@@ -50,7 +50,59 @@ void defragmentation()
 
 }
 
+///////////////////////////////////////////////////////////////
+/* Solution: Once find_free_space failed, call request space to 
+ * allocate more page to this block. We need to modify the page
+ * table and block_meta of this thread_id. find_free_space we 
+ * can try to use recursion to allocate the memory.
+ * */
+///////////////////////////////////////////////////////////////
+
+/* Description: once failed to find a free space in mallocated
+ * memory, we call this function to request more pages. This 
+ * function only modify the page table and the free memory queue
+ * We need to process the swap issues in other function
+ *
+ * @return: 1 on success; 0 on failed
+ * */ 
+int request_space(size_t size, block_meta *block)
+{
+	//calculate how many pages we need to allocate
+	size_t num_of_pages = (size + THREAD_META_SIZE - 1) / PAGE_SIZE + 1;
+	if (queue_size() < num_of_pages)
+		return 0;
+
+	//go to the tail of the link
+	pt_node *node = &page_table[block->page_table_index];
+	while (node->next != NULL)
+		node = node->next;
+
+	for (size_t j = 0 ; j < num_of_pages ; j++)
+	{
+		int page_number = dequeue();
+		//insert page table
+		int i = 0;
+		while (i < 2048 && page_table[i].owner_id != -1)
+			i++;
+		if (i == 2048)
+			return 0;
+		page_table[i].owner_id = current_thread_id;
+		page_table[i].page_num = page_number;
+		page_table[i].map_to_addr = (void *)((char*)(block + 1) + block->size);	
+		page_table[i].current_addr = (void *)((char*)memory_base + page_number * PAGE_SIZE);
+		page_table[i].next = NULL;
+
+		node->next = &page_table[i];
+		node = node->next;
+
+		block->size += PAGE_SIZE;
+	}
+	return 1;
+}
+
 /*@return: the thread block meta if success; NULL if no space to allocate
+ *@comment: may result in waste of memory if we request more memory at first
+ *time
  * */
 //TODO: check correctness
 void *find_free_space(size_t size, block_meta *block)
@@ -59,7 +111,7 @@ void *find_free_space(size_t size, block_meta *block)
 	tb_meta *temp = t_block;
 	int mark = 0;
 	size_t size_counter = 0;
-	while (size_counter < PAGE_SIZE - META_SIZE)
+	while (size_counter < block->size)
 	{
 		if (t_block->isFree == 1 && t_block->size >= size)
 		{
@@ -88,10 +140,18 @@ void *find_free_space(size_t size, block_meta *block)
 		size_counter += (THREAD_META_SIZE + t_block->size);
 		t_block = (tb_meta*)((char*)(block + 1) + size_counter);		
 	}
+	/* Phase A part
 	if (mark == 1)
 		return t_block;
 	else
 		return NULL;
+		*/
+
+	//Phase B
+	if (mark == 1)
+		return t_block;
+	else
+		request_space();
 }
 
 /*Instrument part end*/
@@ -106,14 +166,19 @@ void *malloc_lib(size_t size)
 		int page_number = dequeue();
 		block = (block_meta *)((char*)memory_base + page_number * PAGE_SIZE);
 		block->page_num = page_number;
-		block->size = PAGE_SIZE;
+		block->size = PAGE_SIZE - META_SIZE;
 		block->owner_id = current_thread_id;
 
 		//insert page table
 		int i = 0;
 		while (i < 2048 && page_table[i].owner_id != -1)
 			i++;
+		//TODO: Can this case happens??
+		if (i == 2048)
+			return NULL;
+		block->page_table_index = i;
 		page_table[i].owner_id = current_thread_id;
+		page_table[i].page_num= page_number;
 		page_table[i].map_to_addr = block;
 		page_table[i].current_addr = block;
 
@@ -171,7 +236,7 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 		else
 			return t_block + 1;
 	}
-	else if (type == LIBRARYREQ)                                                                                                             	{
+	else if (type == LIBRARYREQ)                                                                                                             	 {		
 		block_meta *block = (block_meta *)malloc_lib(size);
 		if (block == NULL)
 			return NULL;
@@ -183,6 +248,9 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 	return NULL; 
 }
 
+//TODO: Need to modify this function to compatible with Phase B
+//TODO: should check the linked list to find all the pages in the
+//page table and reset, enqueue...
 void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 {
 	if (!ptr)
@@ -195,6 +263,16 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 	else if (type == LIBRARYREQ)
 	{
 		block_meta *block = ((block_meta *) ptr) - 1;
+
+		//reset page table
+		int i = block->page_table_index;
+		page_table[i].owner_id = -1;	//reset node id to -1
+		page_table[i].page_num = -1;
+		page_table[i].next = NULL;
+		page_table[i].map_to_addr = NULL;
+		page_table[i].current_addr = NULL;
+
+		//add this page to free page queue
 		enqueue(block->page_num);
 	}
 	else

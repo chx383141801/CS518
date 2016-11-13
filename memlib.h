@@ -25,7 +25,7 @@ typedef struct block_meta
     //TODO: more members to be added?
 	int owner_id;
 	int page_num;
-	int padding;		//8 bytes alignment for x86, useless
+	int page_table_index;
 }block_meta;
 #define META_SIZE sizeof(struct block_meta)
 

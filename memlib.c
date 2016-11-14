@@ -3,8 +3,7 @@
 #define MEMORY_SIZE 1024*1024*8
 #define PAGE_SIZE sysconf(_SC_PAGE_SIZE)
 
-//TODO: Need to replace this declaration to memalign() 
-static char memory_space[MEMORY_SIZE];	//total memory
+static char *memory_space = NULL;	//total memory
 void *memory_base = NULL;
 
 //for memory allocation within a thread
@@ -27,7 +26,6 @@ typedef struct pt_node
 	int padding;		//only for 8 bytes alignment in x86, useless
 }pt_node;
 
-//should be less than 2048 in most case. whatever...
 static pt_node page_table[2048];
 
 //initialize page table
@@ -50,11 +48,86 @@ void defragmentation()
 
 }
 
+//////////////////////////////////////////////////////////////
+/* Description to swap:
+ * First check if the swap_to memory is used by other threads
+ * Then swap that page to a free place and mprotect that page
+ * In this way, we must guarantee that there is a free page to
+ * do the swap operation
+ * If queue_size() > 0 we can swap within memory; else swap to
+ * file -- PHASE C
+ * last, unprotect the swap_from page and swap it to the target
+ * */
+//////////////////////////////////////////////////////////////
+
+//TODO: Finish this function
+void swap(void *swap_from, void *swap_to, int page_index)
+{
+	//First check if the swap_to memory is used by other threads
+	if (swap_from == swap_to)
+		return;
+	
+	int i = 0;
+	while (i < 2048 && page_table[i].current_addr != swap_to)
+		i++;
+	//in this case, the target memory is not in use
+	if (i == 2048)
+	{
+		memcpy(swap_to, swap_from, PAGE_SIZE);
+		page_table[page_index].current_addr = swap_to;
+		mprotect(swap_to, PAGE_SIZE, PROT_READ | PROT_WRITE);
+
+		//swap_to = memory_base + page_number * PAGE_SIZE;
+		//page_number = (swap_to - memory_base) / PAGE_SIZE;
+		enqueue(page_table[page_index].page_num);
+		page_table[page_index].page_num = ((char *)swap_to - (char *)memory_base) / PAGE_SIZE;
+
+		//remove the page from the free page queue...dirty part :(
+		//in this case, the free page queue must not be empty, right?
+		while (page_table[page_index].page_num != peek())
+			enqueue(dequeue());
+		
+		int rcv = dequeue();
+		//DEBUG
+		if (rcv != page_table[page_index].page_num)
+			printf("Error in swap!\n");
+	}
+	//in this case, the target memory is used by other thread
+	else
+	{
+		mprotect(swap_to, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		mprotect(swap_from, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		//PHASE B; Need to modify in phase C
+		int page_number;
+		if (queue_size > 0)
+		{
+			//swap the swap_to page to the new free page
+			page_number = dequeue();
+			void *target = (void *)((char *) memory_base + page_number * PAGE_SIZE);
+			memcpy(target, page_table[i].current_addr, PAGE_SIZE);
+			page_table[i].current_addr = target;
+			mprotect(page_table[i].current_addr, PAGE_SIZE, PROT_NONE);
+
+			//move the swap_from page to the target place
+			memcpy(swap_to, swap_from, PAGE_SIZE);
+			page_table[page_index].current_addr = swap_to;
+
+			//modify the page_number part in page table; enqueue the source page 
+			enqueue(page_table[page_index].page_num);
+			page_table[page_index].page_num = page_table[i].page_num;
+			page_table[i].page_num = page_number;
+		}
+		else
+			//PHASE C: swap to file
+			;
+	}
+
+}
+
 ///////////////////////////////////////////////////////////////
 /* Solution: Once find_free_space failed, call request space to 
  * allocate more page to this block. We need to modify the page
- * table and block_meta of this thread_id. find_free_space we 
- * can try to use recursion to allocate the memory.
+ * table and block_meta of this thread_id.
  * */
 ///////////////////////////////////////////////////////////////
 
@@ -108,7 +181,6 @@ int request_space(size_t size, block_meta *block)
 void *find_free_space(size_t size, block_meta *block)
 {
 	tb_meta *t_block = (tb_meta *)(block + 1);
-	tb_meta *temp = t_block;
 	int mark = 0;
 	size_t size_counter = 0;
 	while (size_counter < block->size)
@@ -123,6 +195,7 @@ void *find_free_space(size_t size, block_meta *block)
 			else
 			{
 				//write the block meta information for the remaining memory space 
+				tb_meta *temp = t_block;
 				temp = (tb_meta *)((char *)(temp + 1) + size);
 				temp->isFree = 1;
 				temp->size = t_block->size - size - THREAD_META_SIZE;
@@ -150,8 +223,26 @@ void *find_free_space(size_t size, block_meta *block)
 	//Phase B
 	if (mark == 1)
 		return t_block;
+	/* If we need to request new pages, we assume always start to allocate 
+	 * from the new page, even though there are some remaining spaces at the
+	 * end of the first page
+	 * */
+	else if (request_space(size, block) == 1)
+	{	
+		//calculate how many pages we allocated
+		size_t num_of_pages = (size + THREAD_META_SIZE - 1) / PAGE_SIZE + 1;
+
+		t_block->isFree = 0;
+		t_block->size = size;
+
+		tb_meta *temp = (tb_meta *)((char *)(t_block + 1) + size);
+		temp->isFree = 1;
+		temp->size = num_of_pages * PAGE_SIZE - size - 2 * THREAD_META_SIZE;
+		return t_block;
+	}
 	else
-		request_space();
+		return NULL;	//no more space, request space failed
+
 }
 
 /*Instrument part end*/
@@ -165,7 +256,6 @@ void *malloc_lib(size_t size)
 	{
 		int page_number = dequeue();
 		block = (block_meta *)((char*)memory_base + page_number * PAGE_SIZE);
-		block->page_num = page_number;
 		block->size = PAGE_SIZE - META_SIZE;
 		block->owner_id = current_thread_id;
 
@@ -224,7 +314,8 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 	{
 		init_queue();
 		init_page_table();
-		memory_base = memory_space;
+		memory_space = (char*) memalign(PAGE_SIZE , MEMORY_SIZE * sizeof(char));
+		memory_base = (void*) memory_space;
 	}
 
     //choose which function to deal with the request
@@ -248,9 +339,6 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 	return NULL; 
 }
 
-//TODO: Need to modify this function to compatible with Phase B
-//TODO: should check the linked list to find all the pages in the
-//page table and reset, enqueue...
 void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 {
 	if (!ptr)
@@ -264,16 +352,27 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 	{
 		block_meta *block = ((block_meta *) ptr) - 1;
 
-		//reset page table
 		int i = block->page_table_index;
-		page_table[i].owner_id = -1;	//reset node id to -1
-		page_table[i].page_num = -1;
-		page_table[i].next = NULL;
-		page_table[i].map_to_addr = NULL;
-		page_table[i].current_addr = NULL;
-
-		//add this page to free page queue
-		enqueue(block->page_num);
+		pt_node *node = &page_table[i];
+		//check the linked list to find all the pages under current thread
+		//id and reset its page table content, enqueue the page number
+		while (node != NULL)
+		{
+			//reset page table & add freed page to the queue
+			node->owner_id = -1;
+			node->map_to_addr = NULL;
+			node->current_addr = NULL;
+			enqueue(node->page_num);
+			node->page_num = -1;
+			if (node->next != NULL)
+			{
+				pt_node *temp = node;
+				node = node->next;
+				temp->next = NULL;
+			}
+			else
+				node = node->next;
+		}
 	}
 	else
 		printf("Wrong request type!\n");

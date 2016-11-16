@@ -23,7 +23,7 @@ typedef struct pt_node
 	struct pt_node *next;		//indicate the next page
 	void *map_to_addr;  //the physical memory this page mapped to
 	void *current_addr;	//the physical memory this page currently swapped to
-	int padding;		//only for 8 bytes alignment in x86, useless
+	int isFirst;		//mark if this is the first page of this thread
 }pt_node;
 
 static pt_node page_table[2048];
@@ -38,6 +38,7 @@ void init_page_table()
 		page_table[i].next = NULL;
 		page_table[i].map_to_addr = NULL;
 		page_table[i].current_addr = NULL;
+		page_table[i].isFirst = 0;		//0 means not the first
 	}
 }
 
@@ -165,6 +166,8 @@ int request_space(size_t size, block_meta *block)
 		page_table[i].current_addr = (void *)((char*)memory_base + page_number * PAGE_SIZE);
 		page_table[i].next = NULL;
 
+		swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
+
 		node->next = &page_table[i];
 		node = node->next;
 
@@ -263,14 +266,18 @@ void *malloc_lib(size_t size)
 		int i = 0;
 		while (i < 2048 && page_table[i].owner_id != -1)
 			i++;
-		//TODO: Can this case happens??
 		if (i == 2048)
 			return NULL;
 		block->page_table_index = i;
 		page_table[i].owner_id = current_thread_id;
-		page_table[i].page_num= page_number;
-		page_table[i].map_to_addr = block;
+		page_table[i].page_num = page_number;
+		page_table[i].map_to_addr = memory_base;
 		page_table[i].current_addr = block;
+		page_table[i].isFirst = 1;
+
+		//swap the new memory to the first page and revise the block pointer
+		swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
+		block = page_table[i].map_to_addr;
 
 		//initialize the thread block
 		t_block= (tb_meta*)(block + 1);
@@ -289,10 +296,13 @@ void *malloc_thread(size_t size)
 	int i;
 	for (i = 0 ; i < 2048 ; i++)
 	{
-		if (page_table[i].owner_id == current_thread_id)
+		//find the page table who has the same id and isFirst part is 1
+		if ((page_table[i].owner_id == current_thread_id) && (page_table[i].isFirst == 1))
 		{
-			//Phase A; later we need to consider about the swap in Phase B here
-			block = page_table[i].map_to_addr;
+			//use the current address to locate the page_table_index, then swap, finally give the block map_to_addr
+			block = (block_meta *) page_table[i].current_addr;
+			swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
+			block = (block_meta *) page_table[i].map_to_addr;
 			break;
 		}
 	}
@@ -360,6 +370,7 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 		{
 			//reset page table & add freed page to the queue
 			node->owner_id = -1;
+			node->isFirst = 0;
 			node->map_to_addr = NULL;
 			node->current_addr = NULL;
 			enqueue(node->page_num);

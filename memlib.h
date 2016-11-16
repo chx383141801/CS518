@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include "my_queue.h"
 #include <unistd.h>
+#include <sys/mman.h>
+#include <string.h>
+#include <malloc.h>
 
 #define THREADREQ  1 
 #define LIBRARYREQ 2 

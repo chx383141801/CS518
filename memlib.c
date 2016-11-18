@@ -1,8 +1,10 @@
 #include "memlib.h"
 
 #define MEMORY_SIZE 1024*1024*8
+#define PAGE_TABLE_SIZE 2048*3
 #define PAGE_SIZE sysconf(_SC_PAGE_SIZE)
 
+static FILE *swap_fptr = NULL;
 static char *memory_space = NULL;	//total memory
 void *memory_base = NULL;
 
@@ -24,14 +26,18 @@ typedef struct pt_node
 	void *map_to_addr;  //the physical memory this page mapped to
 	void *current_addr;	//the physical memory this page currently swapped to
 	int isFirst;		//mark if this is the first page of this thread
+	int isExtern;		//if this page is on external disk
+	int extern_index;	//only for external pages
 }pt_node;
 
-static pt_node page_table[2048];
+static pt_node page_table[PAGE_TABLE_SIZE];
+static size_t pt_size = 0;		//the number of pages that already in use
+static int extern_table[4096];		//recording the usage status of external storage
 
 //initialize page table
 void init_page_table()
 {
-	for (int i = 0 ; i < 2048 ; i++)
+	for (int i = 0 ; i < PAGE_TABLE_SIZE ; i++)
 	{
 		page_table[i].owner_id = -1;	//unused node has id -1
 		page_table[i].page_num= -1;
@@ -39,12 +45,20 @@ void init_page_table()
 		page_table[i].map_to_addr = NULL;
 		page_table[i].current_addr = NULL;
 		page_table[i].isFirst = 0;		//0 means not the first
+		page_table[i].isExtrern = 0;	//0 means on physical memory (overlap with extern_index?? whatever...Memory is free!! LOL)
+		page_table[i].extern_index = -1;//-1 means its an internal page
 	}
+}
+
+void init_extern_table()
+{
+	for (int i = 0 ; i < 4096 ; i++)
+		extern_table[i] = 0;	//0 means this part is not in use
 }
 
 /*Instrument part*/
 //TODO: Finish this function
-void defragmentation()
+void page_merge() 
 {
 
 }
@@ -69,10 +83,10 @@ void swap(void *swap_from, void *swap_to, int page_index)
 		return;
 	
 	int i = 0;
-	while (i < 2048 && page_table[i].current_addr != swap_to)
+	while (i < PAGE_TABLE_SIZE && page_table[i].current_addr != swap_to)
 		i++;
 	//in this case, the target memory is not in use
-	if (i == 2048)
+	if (i == PAGE_TABLE_SIZE)
 	{
 		memcpy(swap_to, swap_from, PAGE_SIZE);
 		page_table[page_index].current_addr = swap_to;
@@ -125,6 +139,72 @@ void swap(void *swap_from, void *swap_to, int page_index)
 
 }
 
+/* @Description: swap the page to disk
+ * */
+void swap_out(void *swap_from, int page_index)
+{
+	swap_fptr = fopen("temp.swap", "rb+");
+	if (swap_fptr == NULL)
+	{
+		printf("Error in opeing swap file, error at swap_out\n");
+		return;
+	}
+	int offset;
+	for (offset = 0 ; offset < 4096 ; offset++)
+	{
+		if (extern_table[offset] == 0)
+			break;
+	}
+	page_table[page_index].extern_index = offset;
+	page_table[page_index].isExtern = 1;
+	page_table[page_index].current_addr = NULL;			//TODO: remember to set current addr when swap in
+
+	extern_table[offset] = 1;
+	//TODO: remember to reset to 0 when swap_in and deallocate
+	
+	enqueue(page_table[page_index].page_num);
+	page_table[page_index].page_num = -1;
+	fseek(swap_fptr, offset * PAGE_SIZE, SEEK_SET);
+	//TODO: finish fwrite();
+	fclose();
+}
+
+/* @Description: swap a page from disk to memory. We assume that the 
+ *  target memory address is not in use. If it is in use, we must call
+ *  swap_out to move the page in that memory address to another place.
+ * */
+void swap_in(void *target, int page_index)
+{
+	swap_fptr = fopen("temp.swap", "rb+");
+	if (swap_fptr == NULL)
+	{
+		printf("Error in opeing swap file, error at swap_in\n");
+		return;
+	}
+
+	int offset = page_table[page_index].extern_index;
+	fseek(swap_fptr, offset * PAGE_SIZE, SEEK_SET);
+	//TODO: finish fread();
+	
+	page_table[page_index].current_addr = page_table[page_index].map_to_addr;
+	page_table[page_index].isExtern = 0;
+	page_table[page_index].extern_index = -1;
+	page_table[page_index].page_num = ((char*)map_to_addr - (char*)memory_base) / PAGE_SIZE;
+
+	//remove the page from the free page queue...dirty part again :( :(
+	while (page_table[page_index].page_num != peek())
+		enqueue(dequeue());
+
+	int rcv = dequeue();
+	//DEBUG
+	if (rcv != page_table[page_index].page_num)
+		printf("Error in swap_in!\n");
+	
+	extern_table[offset] = 0;
+
+	fclose();
+}
+
 ///////////////////////////////////////////////////////////////
 /* Solution: Once find_free_space failed, call request space to 
  * allocate more page to this block. We need to modify the page
@@ -143,6 +223,7 @@ int request_space(size_t size, block_meta *block)
 {
 	//calculate how many pages we need to allocate
 	size_t num_of_pages = (size + THREAD_META_SIZE - 1) / PAGE_SIZE + 1;
+	//TODO: Need to be modified in Phase C
 	if (queue_size() < num_of_pages)
 		return 0;
 
@@ -158,6 +239,7 @@ int request_space(size_t size, block_meta *block)
 		int i = 0;
 		while (i < 2048 && page_table[i].owner_id != -1)
 			i++;
+		//TODO: need to modify
 		if (i == 2048)
 			return 0;
 		page_table[i].owner_id = current_thread_id;
@@ -166,6 +248,9 @@ int request_space(size_t size, block_meta *block)
 		page_table[i].current_addr = (void *)((char*)memory_base + page_number * PAGE_SIZE);
 		page_table[i].next = NULL;
 
+		//update page table size
+		pt_size++;
+		
 		swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
 
 		node->next = &page_table[i];
@@ -180,7 +265,6 @@ int request_space(size_t size, block_meta *block)
  *@comment: may result in waste of memory if we request more memory at first
  *time
  * */
-//TODO: check correctness
 void *find_free_space(size_t size, block_meta *block)
 {
 	tb_meta *t_block = (tb_meta *)(block + 1);
@@ -264,16 +348,23 @@ void *malloc_lib(size_t size)
 
 		//insert page table
 		int i = 0;
-		while (i < 2048 && page_table[i].owner_id != -1)
+		while (i < PAGE_TABLE_SIZE && page_table[i].owner_id != -1)
 			i++;
-		if (i == 2048)
+		//This case shouldn't happen. If happens, need to fix bug
+		if (i == PAGE_TABLE_SIZE)
+		{
+			printf("BUG: queue size > 0 while page table is full. error at malloc_lib\n");
 			return NULL;
+		}
 		block->page_table_index = i;
 		page_table[i].owner_id = current_thread_id;
 		page_table[i].page_num = page_number;
 		page_table[i].map_to_addr = memory_base;
 		page_table[i].current_addr = block;
 		page_table[i].isFirst = 1;
+		
+		//update page table size
+		pt_size++;
 
 		//swap the new memory to the first page and revise the block pointer
 		swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
@@ -283,6 +374,12 @@ void *malloc_lib(size_t size)
 		t_block= (tb_meta*)(block + 1);
 		t_block->size = PAGE_SIZE - META_SIZE - THREAD_META_SIZE;
 		t_block->isFree = 1;
+	}
+	else if (pt_size < PAGE_TABLE_SIZE)
+	{
+		//swap_out the first page at memory_base
+		//then write the page table info
+		//initialize the thread block
 	}
 	else
 		return NULL;
@@ -300,8 +397,15 @@ void *malloc_thread(size_t size)
 		if ((page_table[i].owner_id == current_thread_id) && (page_table[i].isFirst == 1))
 		{
 			//use the current address to locate the page_table_index, then swap, finally give the block map_to_addr
-			block = (block_meta *) page_table[i].current_addr;
-			swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
+			if (page_table[i].isExtern == 0)
+			{
+				block = (block_meta *) page_table[i].current_addr;
+				swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
+			}
+			else
+				//TODO: Need to be finished
+				//swap_in();
+				;
 			block = (block_meta *) page_table[i].map_to_addr;
 			break;
 		}
@@ -324,6 +428,7 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 	{
 		init_queue();
 		init_page_table();
+		init_extern_table();
 		memory_space = (char*) memalign(PAGE_SIZE , MEMORY_SIZE * sizeof(char));
 		memory_base = (void*) memory_space;
 	}
@@ -349,6 +454,7 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 	return NULL; 
 }
 
+//TODO: modify this function to compatible with Phase C
 void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 {
 	if (!ptr)
@@ -383,6 +489,8 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 			}
 			else
 				node = node->next;
+			//update page table size
+			pt_size--;
 		}
 	}
 	else

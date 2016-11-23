@@ -25,7 +25,6 @@ int current_thread_id;
 typedef struct block_meta
 {
 	size_t size;
-    //TODO: more members to be added?
 	int owner_id;
 	int reservation;		//8 bytes alignment for x86, or for future use
 	int page_table_index;

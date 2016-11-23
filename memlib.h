@@ -35,5 +35,10 @@ void *myallocate(size_t size, char FILE[], int LINE, int type);
 
 void mydeallocate(void *ptr, char FILE[], int LINE, int type);
 
+void swap_in(void *target, int page_index);
+
+int swap(void *swap_from, void *swap_to, int page_index);
+
+int swap_out(void *source, int page_index);
 
 #endif

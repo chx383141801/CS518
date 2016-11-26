@@ -279,11 +279,12 @@ int request_internal(size_t size, block_meta *block)
 			void *target = (void*)((char*)memory_base + page_number * PAGE_SIZE);
 			if (swap(address, target, i) == 0)
 				return 0;
+			mprotect(target, PAGE_SIZE, PROT_NONE);
 		}
-		
+	
 		//unprotect the address which we will allocate to the thread
 		mprotect(address, PAGE_SIZE, PROT_READ | PROT_WRITE);
-
+	
 		//insert the new page into the page table 
 		int j = 0;
 		while (j < PAGE_TABLE_SIZE && page_table[j].owner_id != -1)
@@ -608,6 +609,8 @@ void *malloc_thread(size_t size)
 	}
 
 	//check the allocated_size and find the free place to allocate memory
+	if (block->size + size + THREAD_META_SIZE >= MEMORY_SIZE - META_SIZE)		//Do not allow a thread to use more spaces than physical memory
+		return NULL;
 	tb_meta *t_block = find_free_space(size, block);
 	return t_block;
 }

@@ -473,6 +473,10 @@ void *malloc_lib(size_t size)
 	{
 		int page_number = dequeue();
 		block = (block_meta *)((char*)memory_base + page_number * PAGE_SIZE);
+		
+		//unprotect the free page which we are going to use
+		mprotect(block, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		
 		block->size = PAGE_SIZE - META_SIZE;
 		block->owner_id = current_thread_id;
 
@@ -509,6 +513,8 @@ void *malloc_lib(size_t size)
 	else if (pt_size < PAGE_TABLE_SIZE)
 	{
 		//swap_out the first page at memory_base
+		mprotect(memory_base, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		
 		if (swap_out(memory_base, ((block_meta*)memory_base)->page_table_index) == 0)
 			return NULL;
 		//then write the page table info
@@ -565,6 +571,7 @@ void *malloc_thread(size_t size)
 			if (page_table[i].isExtern == 0)
 			{
 				block = (block_meta *) page_table[i].current_addr;
+				mprotect(block, PAGE_SIZE, PROT_READ | PROT_WRITE);
 				swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
 			}
 			else

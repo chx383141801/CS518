@@ -68,6 +68,8 @@ void page_merge()
  * */
 int swap_out(void *swap_from, int page_index)
 {
+	//we must unprotect the memory which we are doing operations to
+	mprotect(swap_from, PAGE_SIZE, PROT_READ | PROT_WRITE);
 	if (pt_size - (2048 - queue_size()) >= EXTERN_TABLE_SIZE)
 		return 0;
 
@@ -109,6 +111,8 @@ int swap_out(void *swap_from, int page_index)
  * */
 void swap_in(void *target, int page_index)
 {
+	//We must unprotect the memory which we are doing operations to
+	mprotect(target, PAGE_SIZE, PROT_READ | PROT_WRITE);
 	swap_fptr = fopen("temp.swap", "rb+");
 	if (swap_fptr == NULL)
 	{
@@ -155,6 +159,10 @@ void swap_in(void *target, int page_index)
 
 int swap(void *swap_from, void *swap_to, int page_index)
 {
+	//Unprotect the memory which we will do operations to
+	mprotect(swap_to, PAGE_SIZE, PROT_READ | PROT_WRITE);
+	mprotect(swap_from, PAGE_SIZE, PROT_READ | PROT_WRITE);
+
 	//First check if the swap_to memory is used by other threads
 	if (swap_from == swap_to)
 		return 1;
@@ -167,7 +175,6 @@ int swap(void *swap_from, void *swap_to, int page_index)
 	{
 		memcpy(swap_to, swap_from, PAGE_SIZE);
 		page_table[page_index].current_addr = swap_to;
-		mprotect(swap_to, PAGE_SIZE, PROT_READ | PROT_WRITE);
 
 		//swap_to = memory_base + page_number * PAGE_SIZE;
 		//page_number = (swap_to - memory_base) / PAGE_SIZE;
@@ -187,17 +194,18 @@ int swap(void *swap_from, void *swap_to, int page_index)
 	//in this case, the target memory is used by other thread
 	else
 	{
-		mprotect(swap_to, PAGE_SIZE, PROT_READ | PROT_WRITE);
-		mprotect(swap_from, PAGE_SIZE, PROT_READ | PROT_WRITE);
-		//PHASE B; Need to modify in phase C
 		int page_number;
 		if (queue_size > 0)
 		{
 			//swap the swap_to page to the new free page
 			page_number = dequeue();
 			void *target = (void *)((char *) memory_base + page_number * PAGE_SIZE);
+			mprotect(target, PAGE_SIZE, PROT_READ | PROT_WRITE);
+
 			memcpy(target, page_table[i].current_addr, PAGE_SIZE);
 			page_table[i].current_addr = target;
+
+			//protect the swapped out page
 			mprotect(page_table[i].current_addr, PAGE_SIZE, PROT_NONE);
 
 			//move the swap_from page to the target place
@@ -230,6 +238,9 @@ int swap(void *swap_from, void *swap_to, int page_index)
 			dequeue();
 		}
 	}
+	//set protection to the memory which the page swap from
+	mprotect(swap_from, PAGE_SIZE, PROT_NONE);
+
 	return 1;
 }
 

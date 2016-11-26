@@ -57,10 +57,11 @@ void init_extern_table()
 }
 
 /*Instrument part*/
-//TODO: Finish this function
-void page_merge() 
+//Not a good implementation; only merge the memory after the given block
+void thread_mem_merge(tb_meta* t_block) 
 {
-
+	while (((tb_meta*)((char*)(t_block + 1) + t_block->size))->isFree == 1)
+		t_block->size += (((tb_meta*)((char*)(t_block + 1) + t_block->size))->size + THREAD_META_SIZE);
 }
 
 /* @Description: swap the page to disk
@@ -89,7 +90,6 @@ int swap_out(void *swap_from, int page_index)
 	page_table[page_index].isExtern = 1;
 
 	extern_table[offset] = 1;
-	//TODO: remember to reset to 0 when swap_in and deallocate
 	
 	enqueue(page_table[page_index].page_num);
 	page_table[page_index].page_num = -1;
@@ -280,6 +280,9 @@ int request_internal(size_t size, block_meta *block)
 			if (swap(address, target, i) == 0)
 				return 0;
 		}
+		
+		//unprotect the address which we will allocate to the thread
+		mprotect(address, PAGE_SIZE, PROT_READ | PROT_WRITE);
 
 		//insert the new page into the page table 
 		int j = 0;
@@ -638,7 +641,8 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 		else
 			return t_block + 1;
 	}
-	else if (type == LIBRARYREQ)                                                                                                             	 {		
+	else if (type == LIBRARYREQ)                      
+	{		
 		block_meta *block = (block_meta *)malloc_lib(size);
 		if (block == NULL)
 			return NULL;
@@ -650,7 +654,6 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 	return NULL; 
 }
 
-//TODO: modify this function to compatible with Phase C
 void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 {
 	if (!ptr)
@@ -659,6 +662,7 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 	{
 		tb_meta *t_block = ((tb_meta *) ptr) - 1;
 		t_block->isFree = 1;
+	//	thread_mem_merge(t_block);
 	}
 	else if (type == LIBRARYREQ)
 	{
@@ -677,6 +681,13 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 			node->current_addr = NULL;
 			enqueue(node->page_num);
 			node->page_num = -1;
+
+			//update: clear external table related data 
+			if (node->isExtern == 1)
+				extern_table[node->extern_index] = 0;
+			node->isExtern = 0;
+			node->extern_index = -1;
+
 			if (node->next != NULL)
 			{
 				pt_node *temp = node;
@@ -695,7 +706,7 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 
 int main()
 {
-	int thread_id_1 = 1;
+/*	int thread_id_1 = 1;
 	int thread_id_2 = 2;
     int thread_id_3 = 3;
 
@@ -721,6 +732,37 @@ int main()
 
 	printf("thread 1 proc 1 address: %x\n", t1_proc1);
 	printf("thread 1 proc 2 address: %x\n", t1_proc2);
+*/
+	int thread_id_1 = 1;
+	int thread_id_2 = 2;
+	int thread_id_3 = 3;
+
+	int j = 0;
+	current_thread_id = 1;
+	void *thread_1 = myallocate(4000, NULL, 0, LIBRARYREQ);
+	for(j = 0; j < 5;j++){
+		*((int *)thread_1 + j) = 10;
+		printf("thread1_%dth row context: %x\n",j,*((int *)thread_1 + j));
+
+	}
+	printf("**************\n");
+
+	current_thread_id = 2;
+	void *thread_2 = myallocate(4000, NULL, 0, LIBRARYREQ);
+
+    void *t1_proc1 = myallocate(MEMORY_SIZE - 20000, NULL, 0, THREADREQ);
+
+	int i;
+	for(i = 0; i < PAGE_SIZE;i++){
+		if(page_table[i].owner_id != -1){
+			printf("owner_id = %d\n",page_table[i].owner_id);
+		}
+	}
+	current_thread_id = 1;
+								
+	printf("**************\n");
+	for(j = 0; j < 5;j++)
+		printf("thread1_%dth row context: %x\n",j,*((int *)thread_1 + j));
 
 	return 0;
 }

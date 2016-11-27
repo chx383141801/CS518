@@ -34,9 +34,98 @@ static pt_node page_table[PAGE_TABLE_SIZE];
 static size_t pt_size = 0;		//the number of pages that already in use
 static int extern_table[EXTERN_TABLE_SIZE];		//recording the usage status of external storage
 
+
+static void handler(int sig, siginfo_t *si, void *unused)
+{
+    
+    printf("Got SIGSEGV at address: 0x%x \n",si->si_addr,PAGE_SIZE);
+    
+    
+    int i;
+    /*
+    for(i = 0; i < PAGE_TABLE_SIZE;i++){
+    	if(page_table[i].owner_id != -1){
+    		printf("id = %d,is_extern = %d,page_cur_add = %x, target_add = %x, index = %d\n",page_table[i].owner_id,page_table[i].isExtern,page_table[i].current_addr,page_table[i].map_to_addr,i);
+
+    	}
+    }
+    */
+    
+    //printf("page_cur_add = %x, target_add = %x, index = %d\n",page_table[i].current_addr,page_table[i].map_to_addr,i);
+
+    
+    //int i;
+    void *swap_from, *swap_to;
+    int page_index;
+    int count = 0;
+    for (i = 0 ; i < PAGE_TABLE_SIZE && count < 2 ; i++)
+	{
+		//the thread that occupy target page
+		if(si->si_addr >= page_table[i].current_addr && si->si_addr <= page_table[i].current_addr + PAGE_SIZE){
+			swap_to = page_table[i].current_addr;
+			count++;
+			//mprotect(page_table[i].current_addr, PAGE_SIZE, PROT_READ | PROT_WRITE);
+			//printf("count = %d, cur_add = %x, target->add = %x \n",count,page_table[i].current_addr,page_table[i].map_to_addr);
+		}else if(si->si_addr >= page_table[i].map_to_addr && si->si_addr <= page_table[i].map_to_addr + PAGE_SIZE){
+			swap_from = page_table[i].current_addr;
+			page_index = i;
+			count++;
+			//printf("count = %d, cur_add = %x, target->add = %x \n",count,page_table[i].current_addr,page_table[i].map_to_addr);
+		}
+		//printf("count = %d, cur_add = %x, si->add = %x \n",count,page_table[i].current_addr,si->si_addr);
+
+	}
+	
+	//swap two pages in memory
+	if(page_table[page_index].isExtern == 0)
+	{
+		//printf("page_index = %d, swap_to = %x, swap_from = %x \n",page_index,swap_to,swap_from);
+		mprotect(swap_to, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		//mprotect(swap_from, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		swap(swap_from,swap_to,page_index);
+	}else{
+		printf("Enter extern\n");
+		mprotect(memory_base, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		int j = 0;
+		while (j < PAGE_TABLE_SIZE && page_table[j].current_addr != memory_base)
+			j++;
+		if (j == PAGE_TABLE_SIZE)
+			swap_in(memory_base, i);
+		else if (queue_size() == 0)
+		{
+			if (swap_out(memory_base, j) == 0)
+				return;
+			swap_in(memory_base, page_index);
+		}
+		else
+		{
+			int page_number = peek();
+			void *address = (void*)((char*)memory_base + page_number * PAGE_SIZE);
+			mprotect(page_table[j].current_addr, PAGE_SIZE, PROT_READ | PROT_WRITE);		
+			if(swap(page_table[j].current_addr, address, j) == 0)
+				return NULL;
+
+			swap_in(memory_base, page_index);
+		}
+	}
+	
+	
+}
+
 //initialize page table
 void init_page_table()
 {
+	struct sigaction sa;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_sigaction = handler;
+
+    if (sigaction(SIGSEGV, &sa, NULL) == -1)
+    {
+        printf("Fatal error setting up signal handler\n");
+        exit(EXIT_FAILURE);    //explode!
+    }
+
 	for (int i = 0 ; i < PAGE_TABLE_SIZE ; i++)
 	{
 		page_table[i].owner_id = -1;	//unused node has id -1
@@ -57,10 +146,11 @@ void init_extern_table()
 }
 
 /*Instrument part*/
-//TODO: Finish this function
-void page_merge() 
+//Not a good implementation; only merge the memory after the given block
+void thread_mem_merge(tb_meta* t_block) 
 {
-
+	while (((tb_meta*)((char*)(t_block + 1) + t_block->size))->isFree == 1)
+		t_block->size += (((tb_meta*)((char*)(t_block + 1) + t_block->size))->size + THREAD_META_SIZE);
 }
 
 /* @Description: swap the page to disk
@@ -89,7 +179,6 @@ int swap_out(void *swap_from, int page_index)
 	page_table[page_index].isExtern = 1;
 
 	extern_table[offset] = 1;
-	//TODO: remember to reset to 0 when swap_in and deallocate
 	
 	enqueue(page_table[page_index].page_num);
 	page_table[page_index].page_num = -1;
@@ -195,7 +284,7 @@ int swap(void *swap_from, void *swap_to, int page_index)
 	else
 	{
 		int page_number;
-		if (queue_size > 0)
+		if (queue_size() > 0)
 		{
 			//swap the swap_to page to the new free page
 			page_number = dequeue();
@@ -279,8 +368,12 @@ int request_internal(size_t size, block_meta *block)
 			void *target = (void*)((char*)memory_base + page_number * PAGE_SIZE);
 			if (swap(address, target, i) == 0)
 				return 0;
+			mprotect(target, PAGE_SIZE, PROT_NONE);
 		}
-
+	
+		//unprotect the address which we will allocate to the thread
+		mprotect(address, PAGE_SIZE, PROT_READ | PROT_WRITE);
+	
 		//insert the new page into the page table 
 		int j = 0;
 		while (j < PAGE_TABLE_SIZE && page_table[j].owner_id != -1)
@@ -473,6 +566,10 @@ void *malloc_lib(size_t size)
 	{
 		int page_number = dequeue();
 		block = (block_meta *)((char*)memory_base + page_number * PAGE_SIZE);
+		
+		//unprotect the free page which we are going to use
+		mprotect(block, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		
 		block->size = PAGE_SIZE - META_SIZE;
 		block->owner_id = current_thread_id;
 
@@ -509,6 +606,8 @@ void *malloc_lib(size_t size)
 	else if (pt_size < PAGE_TABLE_SIZE)
 	{
 		//swap_out the first page at memory_base
+		mprotect(memory_base, PAGE_SIZE, PROT_READ | PROT_WRITE);
+		
 		if (swap_out(memory_base, ((block_meta*)memory_base)->page_table_index) == 0)
 			return NULL;
 		//then write the page table info
@@ -565,6 +664,7 @@ void *malloc_thread(size_t size)
 			if (page_table[i].isExtern == 0)
 			{
 				block = (block_meta *) page_table[i].current_addr;
+				mprotect(block, PAGE_SIZE, PROT_READ | PROT_WRITE);
 				swap(page_table[i].current_addr, page_table[i].map_to_addr, block->page_table_index);
 			}
 			else
@@ -598,6 +698,8 @@ void *malloc_thread(size_t size)
 	}
 
 	//check the allocated_size and find the free place to allocate memory
+	if (block->size + size + THREAD_META_SIZE >= MEMORY_SIZE - META_SIZE)		//Do not allow a thread to use more spaces than physical memory
+		return NULL;
 	tb_meta *t_block = find_free_space(size, block);
 	return t_block;
 }
@@ -631,7 +733,8 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 		else
 			return t_block + 1;
 	}
-	else if (type == LIBRARYREQ)                                                                                                             	 {		
+	else if (type == LIBRARYREQ)                      
+	{		
 		block_meta *block = (block_meta *)malloc_lib(size);
 		if (block == NULL)
 			return NULL;
@@ -643,7 +746,6 @@ void *myallocate(size_t size, char FILE[], int LINE, int type)
 	return NULL; 
 }
 
-//TODO: modify this function to compatible with Phase C
 void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 {
 	if (!ptr)
@@ -652,6 +754,7 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 	{
 		tb_meta *t_block = ((tb_meta *) ptr) - 1;
 		t_block->isFree = 1;
+	//	thread_mem_merge(t_block);
 	}
 	else if (type == LIBRARYREQ)
 	{
@@ -670,6 +773,13 @@ void mydeallocate(void *ptr, char FILE[], int LINE, int type)
 			node->current_addr = NULL;
 			enqueue(node->page_num);
 			node->page_num = -1;
+
+			//update: clear external table related data 
+			if (node->isExtern == 1)
+				extern_table[node->extern_index] = 0;
+			node->isExtern = 0;
+			node->extern_index = -1;
+
 			if (node->next != NULL)
 			{
 				pt_node *temp = node;
@@ -692,6 +802,98 @@ int main()
 	int thread_id_2 = 2;
     int thread_id_3 = 3;
 
+    int j = 0;
+	current_thread_id = 1;
+	void *thread_1 = myallocate(4000, NULL, 0, LIBRARYREQ);
+	void *t1_proc1 = myallocate(MEMORY_SIZE - 5000, NULL, 0, THREADREQ);
+	for(j = 0; j < 5;j++){
+		*((int *)thread_1 + j) = 10;
+		printf("thread1_%dth row context: %x\n",j,*((int *)thread_1 + j));
+
+	}
+	printf("**************\n");
+
+	current_thread_id = 2;
+	void *thread_2 = myallocate(4000, NULL, 0, LIBRARYREQ);
+	//printf("hello\n");
+	//void *t1_proc1 = myallocate(MEMORY_SIZE - 9000, NULL, 0, THREADREQ);
+	
+	for(j = 0; j < 5;j++){
+		*((int *)thread_2 + j) = 55;
+		printf("thread2_%dth row context: %x\n",j,*((int *)thread_2 + j));
+	}
+	int i;
+	for(i = 0; i < PAGE_SIZE;i++){
+		if(page_table[i].owner_id == current_thread_id){
+			mprotect(page_table[i].current_addr, PAGE_SIZE, PROT_NONE);
+			//break;
+		}
+	}
+	/*
+	int i;
+	
+	for(i = 0; i < PAGE_SIZE;i++){
+		if(page_table[i].owner_id != -1){
+			printf("owner_id = %d\n",page_table[i].owner_id);
+		}
+	}
+	*/
+
+	current_thread_id = 1;
+	
+	printf("**************\n");
+	for(j = 0; j < 5;j++)
+		printf("thread1_%dth row context: %x\n",j,*((int *)thread_1 + j));
+
+	for(i = 0; i < PAGE_SIZE;i++){
+		if(page_table[i].owner_id == current_thread_id){
+			mprotect(page_table[i].current_addr, PAGE_SIZE, PROT_NONE);
+			//break;
+		}
+	}
+	current_thread_id = 2;
+	for(i = 0; i < PAGE_TABLE_SIZE;i++){
+    	if(page_table[i].owner_id == current_thread_id){
+    		printf("id = %d,is_extern = %d,page_cur_add = %x, target_add = %x, index = %d\n",page_table[i].owner_id,page_table[i].isExtern,page_table[i].current_addr,page_table[i].map_to_addr,i);
+
+    	}
+    }
+	printf("**************\n");
+	for(j = 0; j < 5;j++)
+		printf("thread1_%dth row context: %x\n",j,*((int *)thread_2 + j));
+    /*
+    int j = 0;
+	current_thread_id = 1;
+	void *thread_1 = myallocate(4000, NULL, 0, LIBRARYREQ);
+	for(j = 0; j < 5;j++){
+		*((int *)thread_1 + j) = 10;
+		printf("thread1_%dth row context: %x\n",j,*((int *)thread_1 + j));
+
+	}
+	printf("**************\n");
+	current_thread_id = 2;
+	void *thread_2 = myallocate(4000, NULL, 0, LIBRARYREQ);
+	for(j = 0; j < 5;j++){
+		*((int *)thread_1 + j) = 55;
+		printf("thread2_%dth row context: %x\n",j,*((int *)thread_2 + j));
+	}
+	int i;
+
+	for(i = 0; i < PAGE_SIZE;i++){
+		if(page_table[i].owner_id == current_thread_id){
+			mprotect(page_table[i].current_addr, PAGE_SIZE, PROT_NONE);
+			break;
+		}
+	}
+	current_thread_id = 1;
+	
+	printf("**************\n");
+	for(j = 0; j < 5;j++)
+		printf("thread1_%dth row context: %x\n",j,*((int *)thread_1 + j));
+	*/
+
+
+	/*
 	current_thread_id = 1;
 	void *thread_1 = myallocate(4000, NULL, 0, LIBRARYREQ);
 	current_thread_id = 2;
@@ -714,6 +916,6 @@ int main()
 
 	printf("thread 1 proc 1 address: %x\n", t1_proc1);
 	printf("thread 1 proc 2 address: %x\n", t1_proc2);
-
+	*/
 	return 0;
 }

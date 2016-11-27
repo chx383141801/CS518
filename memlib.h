@@ -7,7 +7,7 @@
 #include <sys/mman.h>
 #include <string.h>
 #include <malloc.h>
-
+#include <signal.h>
 #define THREADREQ  1 
 #define LIBRARYREQ 2 
 
